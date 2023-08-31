@@ -1,4 +1,4 @@
-﻿// Copyright (c) 2018, Rene Lergner - @Heathcliff74xda
+// Copyright (c) 2018, Rene Lergner - @Heathcliff74xda
 //
 // Permission is hereby granted, free of charge, to any person obtaining a
 // copy of this software and associated documentation files (the "Software"),
@@ -281,121 +281,110 @@ namespace WPinternals
             }
         }
 
-        private void FFUDownloaded(string[] Files, object State)
-        {
-            App.Config.AddFfuToRepository(Files[0]);
-        }
+        internal class DownloadEntry : INotifyPropertyChanged
+{
+    private readonly SynchronizationContext UIContext;
+    public event PropertyChangedEventHandler PropertyChanged = delegate { };
+    internal Action<string[], object> Callback;
+    internal object State;
+    internal string URL;
+    internal string[] URLCollection;
+    internal string Folder;
+    internal HttpClient Client;
+    internal long SpeedIndex = -1;
+    internal long[] Speeds = new long[10];
+    internal long LastBytesReceived;
+    internal long BytesReceived;
 
-        private void FFUDownloadedAndCheckSupported(string[] Files, object State)
+    internal DownloadEntry(string URL, string Folder, string[] URLCollection, Action<string[], object> Callback, object State)
+    {
+        UIContext = SynchronizationContext.Current;
+        this.URL = URL;
+        this.Callback = Callback;
+        this.State = State;
+        this.URLCollection = URLCollection;
+        this.Folder = Folder;
+        Directory.CreateDirectory(Folder);
+        Name = GetFileNameFromURL(URL);
+        Uri Uri = new(Uri.EscapeUriString(URL)); // Escape special characters in the URL
+        Status = DownloadStatus.Downloading;
+        new Thread(() =>
         {
-            App.Config.AddFfuToRepository(Files[0]);
+            Size = GetFileLengthFromURL(URL);
 
-            if (!App.Config.FFURepository.Any(e => App.PatchEngine.PatchDefinitions.First(p => p.Name == "SecureBootHack-V2-EFIESP").TargetVersions.Any(v => v.Description == e.OSVersion)))
+            Client = new HttpClient();
+            _ = Client.DownloadFileAsync(Uri, Path.Combine(Folder, GetFileNameFromURL(Uri.LocalPath)), Client_DownloadProgressChanged, Client_DownloadFileCompleted);
+        }).Start();
+    }
+
+    private void Client_DownloadFileCompleted(bool Error)
+    {
+        void Finish()
+        {
+            Status = Error ? DownloadStatus.Failed : DownloadStatus.Ready;
+            App.DownloadManager.DownloadList.Remove(this);
+            if (Status == DownloadStatus.Ready)
             {
-                const string ProductType2 = "RM-1085";
-                string URL = LumiaDownloadModel.SearchFFU(ProductType2, null, null);
-                Download(URL, ProductType2, FFUDownloaded, null);
-            }
-        }
-
-        private void EmergencyDownloaded(string[] Files, object State)
-        {
-            string Type = (string)State;
-            string ProgrammerPath = null;
-            string PayloadPath = null;
-
-            for (int i = 0; i < Files.Length; i++)
-            {
-                if (Files[i].EndsWith(".ede", StringComparison.OrdinalIgnoreCase))
+                if (URLCollection?.Any(c => App.DownloadManager.DownloadList.Any(d => d.URL == c)) != true)
                 {
-                    ProgrammerPath = Files[i];
-                }
-
-                if (Files[i].EndsWith(".edp", StringComparison.OrdinalIgnoreCase))
-                {
-                    PayloadPath = Files[i];
-                }
-            }
-
-            if ((Type != null) && (ProgrammerPath != null) && (PayloadPath != null))
-            {
-                App.Config.AddEmergencyToRepository(Type, ProgrammerPath, PayloadPath);
-            }
-        }
-        public ObservableCollection<DownloadEntry> DownloadList { get; } = new();
-        public ObservableCollection<SearchResult> SearchResultList { get; } = new();
-
-        private DelegateCommand _DownloadSelectedCommand = null;
-        public DelegateCommand DownloadSelectedCommand
-        {
-            get
-            {
-                return _DownloadSelectedCommand ??= new DelegateCommand(() => DownloadSelected());
-            }
-        }
-
-        private DelegateCommand _SearchCommand = null;
-        public DelegateCommand SearchCommand
-        {
-            get
-            {
-                return _SearchCommand ??= new DelegateCommand(() => Search());
-            }
-        }
-
-        private DelegateCommand _DownloadAllCommand = null;
-        public DelegateCommand DownloadAllCommand
-        {
-            get
-            {
-                return _DownloadAllCommand ??= new DelegateCommand(() => DownloadAll());
-            }
-        }
-
-        private string _DownloadFolder = null;
-        public string DownloadFolder
-        {
-            get
-            {
-                return _DownloadFolder;
-            }
-            set
-            {
-                if (_DownloadFolder != value)
-                {
-                    _DownloadFolder = value;
-
-                    try
+                    string[] Files;
+                    if (URLCollection == null)
                     {
-                        Directory.CreateDirectory(_DownloadFolder);
-                    }
-                    catch { }
-                    if (!Directory.Exists(_DownloadFolder))
-                    {
-                        _DownloadFolder = @"C:\ProgramData\WPinternals\Repository";
-                        Directory.CreateDirectory(_DownloadFolder);
-                    }
-
-                    RegistryKey Key = Registry.CurrentUser.OpenSubKey(@"Software\WPInternals", true);
-
-                    if (_DownloadFolder == null)
-                    {
-                        if (Key.GetValue("DownloadFolder") != null)
-                        {
-                            Key.DeleteValue("DownloadFolder");
-                        }
+                        Files = new string[1];
+                        Files[0] = Path.Combine(Folder, GetFileNameFromURL(URL));
                     }
                     else
                     {
-                        Key.SetValue("DownloadFolder", _DownloadFolder);
+                        Files = new string[URLCollection.Length];
+                        for (int i = 0; i < URLCollection.Length; i++)
+                        {
+                            Files[i] = Path.Combine(Folder, GetFileNameFromURL(URLCollection[i]));
+                        }
                     }
 
-                    Key.Close();
-
-                    OnPropertyChanged(nameof(DownloadFolder));
+                    Callback(Files, State);
                 }
             }
         }
+
+        UIContext?.Post(d => Finish(), null);
+    }
+
+    private void Client_DownloadProgressChanged(HttpClientDownloadProgress e)
+    {
+        BytesReceived = e.BytesReceived;
+        Progress = e.ProgressPercentage;
+    }
+
+    // ... Other methods and properties remain unchanged ...
+
+    // New method to get the length of a file from a URL
+    internal static long GetFileLengthFromURL(string URL)
+    {
+        long Length = 0;
+        using (HttpClient client = new HttpClient())
+        {
+            using (HttpResponseMessage response = client.GetAsync(URL, HttpCompletionOption.ResponseHeadersRead).Result)
+            {
+                if (response.IsSuccessStatusCode)
+                {
+                    if (response.Content.Headers.ContentLength.HasValue)
+                    {
+                        Length = response.Content.Headers.ContentLength.Value;
+                    }
+                }
+            }
+        }
+        return Length;
+    }
+
+    // New method to get the file name from a URL
+    internal static string GetFileNameFromURL(string URL)
+    {
+        return Path.GetFileName(URL);
+    }
+}
+
 
         private string _ProductCode = null;
         public string ProductCode
